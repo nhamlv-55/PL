@@ -125,8 +125,8 @@
 (define (subst expr sub-id val)
   (type-case F1WAE expr
     [num (n) expr]
-    [add (l r) ((display sub-id)
-                (add (subst l sub-id val)(subst r sub-id val)))]
+    [add (l r) 
+                (add (subst l sub-id val)(subst r sub-id val))]
     [sub (l r) (sub (subst l sub-id val)(subst r sub-id val))]
     [with (bound-id named-expr body-expr)
       (with bound-id 
@@ -146,7 +146,8 @@
                                (subst (symExprPair-expr x) sub-id val))) 
                 fields))]
     [get (rec id) (get (subst rec sub-id val) id)]
-    ))
+    )
+  )
 
 ;; substN: F1WAE list-of-sym list-of-F1WAE-Val -> F1WAE
 ;; for each id in sub-ids, substitute in expr the corresponding val from vals
@@ -238,8 +239,16 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; parser tests
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(define (run string list)
+  (interp-expr
+   (parse (string->sexpr string))
+   list)
+  )
+
 (interp 
  (parse (string->sexpr "{f 1 2}"))
   (list (parse-defn '{deffun {f a b} {+ a b}})) )
 (interp (parse (string->sexpr "{+ {f} {f}}"))
         (list (parse-defn '{deffun {f} 5})))
+(test/exn (run "{bleh}" empty) "bad syntax")
+(test (run "{with {x 2} {- {+ x x} x}}" empty) 2)
