@@ -29,8 +29,15 @@
                  (regexp-replace*
                   "''" (regexp-replace* string-re str "\"\\1\"") "'"))])
     (if (= 1 (length sexprs))
-      (car sexprs)
-      (error 'string->sexpr "bad syntax (multiple expressions)"))))
+        (car sexprs)
+        (error 'string->sexpr "bad syntax (multiple expressions)"))))
+;print: a helper function to print things nicely
+(define (print comment x)
+  (begin
+    (display comment)
+    (display x)
+    (display "\n")))
+
 
 (define-type KCFAE
   [num (n number?)]
@@ -47,7 +54,10 @@
        (then KCFAE?)
        (else KCFAE?)]
   [withcc (name symbol?)
-          (body KCFAE?)])
+          (body KCFAE?)]
+  [try-catch (try KCFAE?)
+             (catch KCFAE?)]
+  [throw])
 
 (define-type KCFAE-Value
   [numV (n number?)]
@@ -75,7 +85,10 @@
 (define (parse-sexpr sexp)
   (cond
     [(number? sexp) (num sexp)]
-    [(symbol? sexp) (id sexp)]
+    [(symbol? sexp) (cond
+                      [(symbol=? 'throw sexp) (throw)]
+                      [else (id sexp)])
+                    ]
     [(pair? sexp)
      (case (car sexp)
        [(+) (add (parse-sexpr (second sexp)) (parse-sexpr (third sexp)))]
@@ -87,24 +100,28 @@
        ;[(withcc) (withcc (second sexp) ((parse-sexpr (third sexp))))]
        [(withcc) (withcc (second sexp) (parse-sexpr (third sexp)))]
        ;[else (app (parse-sexpr (first sexp)) (parse-sexpr (second sexp)))]
+       [(try) (try-catch (parse-sexpr (second sexp))
+                         (parse-sexpr (fourth sexp)))]
        [else (app (parse-sexpr (first sexp)) (parse-list (rest sexp)))]
        )]))
-
+;; parse-list: (listof sexpr) -> (listof KCFAE)
+;; parse a list of sexpr to a list of KCFAE
 (define (parse-list list-of-sexpr)
   (cond
     [(empty? list-of-sexpr) empty]
     [else (cons (parse-sexpr (first list-of-sexpr))  (parse-list (rest list-of-sexpr))   )])
   )
-
+;(test (parse-list  '((+ 8 2) (- 16 4)) ) 
+;      (list (add (num 8) (num 2)) (sub (num 16) (num 4))) )
 ;; parse: string -> BFAE
 ;; parses a string containing a BFAE expression to a BFAE AST
 (define (parse str)
   (parse-sexpr (string->sexpr str)))
 
-;(test (parse "3") (num 3))
-;(test (parse "x") (id 'x))
-;(test (parse "{+ 1 2}") (add (num 1) (num 2)))
-;(test (parse "{- 1 2}") (sub (num 1) (num 2)))
+(test (parse "3") (num 3))
+(test (parse "x") (id 'x))
+(test (parse "{+ 1 2}") (add (num 1) (num 2)))
+(test (parse "{- 1 2}") (sub (num 1) (num 2)))
 (test (parse "{fun {x} x}") (fun '(x) (id 'x)))
 (test (parse "{1 2}") (app (num 1) (list (num 2))))
 (test (parse "{if0 0 1 2}") (if0 (num 0) (num 1) (num 2)))
@@ -112,61 +129,84 @@
 
 ;; ----------------------------------------
 
-;; interp : KCFAE DefrdSub (KCFAE-Value -> alpha) -> alpha
-(define (interp a-fae ds k)
+;; interp : KCFAE DefrdSub (KCFAE-Value -> alpha) catcher -> alpha
+;; return a procedure from calculating a procedure with its ds and exception handler
+(define (interp a-fae ds k catcher)
   (type-case KCFAE a-fae
     [num (n) (k (numV n))]
     [add (l r) (interp l ds
                        (lambda (v1)
                          (interp r ds
                                  (lambda (v2)
-                                   (k (num+ v1 v2))))))]
+                                   (k (num+ v1 v2)))
+                                 catcher))
+                       catcher)]
     [sub (l r) (interp l ds
                        (lambda (v1)
                          (interp r ds
                                  (lambda (v2)
-                                   (k (num- v1 v2))))))]
+                                   (k (num- v1 v2)))
+                                 catcher))
+                       catcher)]
     [id (name) (k (lookup name ds))]
     [fun (param body-expr)
          (k (closureV param body-expr ds))]
     [app (fun-expr arg-expr)
-         (interp fun-expr ds
-                 (lambda (fun-val)
-                   (interp-many arg-expr ds
-                           (lambda (arg-vals)
-                             (type-case KCFAE-Value fun-val
-                               [closureV (params body ds)
-                                         (interp body
-                                                 (add-sub params
-                                                       arg-vals
-                                                       ds)
-                                                 k)]
-                               [contV (k)
-                                      (k (first arg-vals))]
-                               [else (error 'interp "not a function")])))))]
+         ;(begin 
+          ;(print "fun-expr" fun-expr) (print  "arg-expr" arg-expr)
+           (interp fun-expr ds
+                   (lambda (fun-val)
+                     (interp-many arg-expr ds
+                                  (lambda (arg-vals)
+                                    (type-case KCFAE-Value fun-val
+                                      [closureV (params body ds)
+                                                (cond
+                                                  [(not (= (length arg-vals) (length params)))
+                                                   (error 'interp "Different number of args")]
+                                                [else (interp body
+                                                        (add-sub params
+                                                                 arg-vals
+                                                                 ds)
+                                                        k catcher)]
+                                                )]
+                                      [contV (k)
+                                             (k (first arg-vals))]
+                                      [else (error 'interp "not a function")]))
+                                  catcher))
+                   catcher)
+           
+           ;)
+         ]
     [if0 (test-expr then-expr else-expr)
          (interp test-expr ds
                  (lambda (v)
                    (if (numzero? v)
-                       (interp then-expr ds k)
-                       (interp else-expr ds k))))]
+                       (interp then-expr ds k catcher)
+                       (interp else-expr ds k catcher)))
+                 catcher)]
     [withcc (id body-expr)
             (interp body-expr 
                     (aSub id
                           (contV k)
                           ds)
-                    k)]))
-
-(define (interp-many list_of_expr ds k)
+                    k catcher)]
+    [try-catch (try-expr catch-expr) 
+               (interp try-expr ds k
+                       (lambda ()
+                         (interp catch-expr ds k catcher))
+                       )]
+    [throw () (catcher)]))
+;; interp-many: (listof KCFAE) DefrdSub (KCFAE-Value -> alpha) catcher -> alpha
+;; return a procedure from calculating a procedure with a list of arguments and exception handler
+(define (interp-many list_of_expr ds k catcher)
   (cond
     [(empty? list_of_expr) (k empty)]
     [else (interp (first list_of_expr) ds 
                   (lambda (val) ;interp-many of the first element will return 1 value
                     (interp-many (rest list_of_expr) ds 
-                                 (lambda (vals) (k (cons val vals))) ; interp many of the rest will return a list
-                                 )
-                    )
-                  )
+                                 (lambda (vals) (k (cons val vals))) ; interp-many of the rest will return a list
+                                 catcher))
+                  catcher)
           ]
     )
   )
@@ -197,7 +237,10 @@
 
 ;; interp-expr : KCFAE -> number-or-'function
 (define (interp-expr a-fae)
-  (type-case KCFAE-Value (interp a-fae (mtSub) (lambda (x) x))
+  (type-case KCFAE-Value (interp a-fae 
+                                 (mtSub) 
+                                 (lambda (x) x) 
+                                 (lambda () (error 'interp "undefined")))
     [numV (n) n]
     [closureV (param body ds) 'function]
     [contV (k) 'function]))
@@ -208,32 +251,76 @@
   (interp-expr (parse str)))
 
 (test (run "{{fun {x y} {- y x}} 10 12}") 2)
+(test (run "{{fun {x y} {- y x}} {+ 8 2} {- 16 4}}") 2)
 (test (run "{fun {} 12}") 'function)
 (test (run "{fun {x} {fun {} x}}") 'function)
 (test (run "{{{fun {x} {fun {} x}} 13}}") 13)
 (test (run "{withcc esc {{fun {x y} x} 1 {esc 3}}}") 3)
 ;;old tests
- (test (run "10")
-       10)
- (test (run "{fun {x} x}")
-       'function)
- (test (run "{withcc x x}")
-       'function)
- (test (run "{+ 10 7}")
-       17)
- (test (run "{- 10 7}")
-       3)
- (test (run "{{fun {x} {+ x 12}} {+ 1 17}}")
-       30)
- (test (run "{{fun {x} {{fun {f} {+ {f 1} {{fun {x} {f 2}} 3}}}
-                        {fun {y} {+ x y}}}}
-              0}")
-       3)
- (test (run "{withcc k {k 10}}")
-       10)
- (test (run "{withcc k {+ {k 10} 17}}")
-       10)
- 
- 
+(test (run "10")
+      10)
+(test (run "{fun {x} x}")
+      'function)
+(test (run "{withcc x x}")
+      'function)
+(test (run "{+ 10 7}")
+      17)
+(test (run "{- 10 7}")
+      3)
+(test (run "{{fun {x} {- x 12}} {+ 1 17}}")
+      6)
+(test (run "{{fun {x} {{fun {f} {+ {f 1} {{fun {x} {f 2}} 3}}}
+                         {fun {y} {+ x y}}}}
+               0}")
+      3)
+(test (run "{withcc k {k 10}}")
+      10)
+(test (run "{withcc k {+ {k 10} 17}}")
+      10)
 
+(test (run "{try 7 catch 8}")
+      7)
+
+(test (interp-expr (try-catch (num 7) (num 8)))
+      7)
+;;
+(test (run "{try {throw} catch 8}")
+      8)
+
+(test (interp-expr (try-catch (throw) (num 8))) 
+      8)
+
+
+(test (run "{try {+ 1 {throw}} catch 8}")
+      8)
+(test (run "{{fun {f} {try {f 3} catch 8}}
+               {fun {x} {throw}}}")
+      8)
+(test (run "{try {try {throw} catch 8} catch 9}")
+      8)
+(test (run "{try {try {throw} catch {throw}} catch 9}")
+      9)
+(test (run "{try {try 7 catch {throw}} catch 9}")
+      7)
+(test (run "{{withcc esc {try {{withcc k {esc k}} 0} catch {fun {x} 8}}}
+               {fun {x} {throw}}}")
+      8)
+
+(test/exn (run "{try {+ 1 {throw}} catch {throw}}")
+          "interp: undefined")
+
+(test/exn (run 1) "ring->sexpr: expects argument of type <string>")
+(test/exn (run "'") "syntax error (bad contents)")
+(test/exn (run "{+ 1 1} {+ 2 2}") "bad syntax (multiple expressions)")
+;; Test for checkig the number of args
+(test/exn (run "{{fun {x y} {- y x}} 10 12 17}") "interp: Different number of args")
+(test/exn (run "{{fun {x y} x} 10} ") "interp: Different number of args")
+(test (run "{withcc esc {{fun {x y} x} {esc 3}}}" ) 3)
+(test/exn (run "{withcc esc {{fun {x y} x} 1 {esc {{fun {x y} {- y x}} 10 12 17}} 10}}")
+          "interp: Different number of args")
+(test (run "{withcc esc {{fun {x y} x} 1 {esc {{fun {x y} {- y x}} 10 12}} 10}}") 2)
+(test (run "{
+        {fun {a} a}
+              {withcc esc {{fun {x y} x} 1 {esc {{fun {x y} {- y x}} 10 12}} 10}}
+        }") 2)
 
