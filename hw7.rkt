@@ -53,10 +53,13 @@
   [if0 (test KCFAE?)
        (then KCFAE?)
        (else KCFAE?)]
+  ;withcc: continuation
   [withcc (name symbol?)
           (body KCFAE?)]
+  ;try-catch: exception
   [try-catch (try KCFAE?)
              (catch KCFAE?)]
+  ;throw:
   [throw])
 
 (define-type KCFAE-Value
@@ -82,6 +85,7 @@
 ;; ----------------------------------------
 
 ;; parse-sexpr : S-expr -> KCFAE
+;; parse an S-expr to a KCFAE
 (define (parse-sexpr sexp)
   (cond
     [(number? sexp) (num sexp)]
@@ -118,6 +122,7 @@
 (define (parse str)
   (parse-sexpr (string->sexpr str)))
 
+;;test for parse, parse-list
 (test (parse "3") (num 3))
 (test (parse "x") (id 'x))
 (test (parse "{+ 1 2}") (add (num 1) (num 2)))
@@ -130,7 +135,7 @@
 ;; ----------------------------------------
 
 ;; interp : KCFAE DefrdSub (KCFAE-Value -> alpha) catcher -> alpha
-;; return a procedure from calculating a procedure with its ds and exception handler
+;; return a KCFAE-Value from calculating a procedure with its ds and exception handler
 (define (interp a-fae ds k catcher)
   (type-case KCFAE a-fae
     [num (n) (k (numV n))]
